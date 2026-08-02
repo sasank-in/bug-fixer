@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Generated campaign output
+report.md
+report.json
+examples/vulnerable_api/openapi.json

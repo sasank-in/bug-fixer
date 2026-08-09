@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor declared in pyproject; 3.13 is what development
+        # happens on. The trace parser is version-sensitive (3.11+ emits caret
+        # markers in tracebacks), so both ends genuinely need covering.
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev,demo]"
+
+      - name: Lint
+        run: ruff check autoqa/ tests/ examples/
+
+      - name: Test
+        run: pytest -q
+
+  dogfood:
+    # Run AutoQA against its own demo API and publish the report. If the tool
+    # stops finding the planted bugs, that is a regression worth failing on.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev,demo]"
+
+      - name: Generate spec
+        run: |
+          python -c "import json; from examples.vulnerable_api.app import app; \
+            print(json.dumps(app.openapi()))" > openapi.json
+
+      - name: Fuzz the demo API
+        run: |
+          python -m autoqa.cli \
+            --spec openapi.json --url http://127.0.0.1:8099 \
+            --launch "python -m uvicorn examples.vulnerable_api.app:app --port 8099 --log-level warning" \
+            --health /health --cases 30 --seed 42 \
+            --md report.md --json report.json
+
+      - name: Assert the planted bugs were found
+        run: |
+          python -c "
+          import json, sys
+          d = json.load(open('report.json'))
+          n = len(d['clusters'])
+          print(f'{n} distinct issues found')
+          sys.exit(0 if n >= 5 else 1)
+          "
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: autoqa-report
+          path: |
+            report.md
+            report.json

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 import statistics
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Iterable
 
 from autoqa.runner.executor import Result
 

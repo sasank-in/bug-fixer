@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import copy
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 # Values that break naive parsers, injection sinks, and integer handling.
 # Kept deliberately small and high-yield: every extra entry multiplies request
@@ -200,12 +201,12 @@ def mutate_leaf(
             if not node:
                 leaves.append((trail, label))
             for k, v in node.items():
-                walk(v, trail + [k], f"{label}.{k}")
+                walk(v, [*trail, k], f"{label}.{k}")
         elif isinstance(node, list):
             if not node:
                 leaves.append((trail, label))
             for i, v in enumerate(node):
-                walk(v, trail + [i], f"{label}[{i}]")
+                walk(v, [*trail, i], f"{label}[{i}]")
         else:
             leaves.append((trail, label))
 

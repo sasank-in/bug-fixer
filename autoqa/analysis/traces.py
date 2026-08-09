@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 
 from autoqa.runner.process import LogLine
 
-
 # Path fragments that mark a frame as dependency or runtime code rather than
 # the application under test. Compared against a forward-slashed, lowercased
 # path so Windows and POSIX layouts both match.

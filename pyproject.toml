@@ -17,6 +17,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "ruff>=0.6",
 ]
 demo = [
     "fastapi>=0.110",
@@ -32,3 +33,31 @@ include = ["autoqa*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--strict-markers"
+markers = [
+    "e2e: spawns a real target process and fuzzes it (slower)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # FastAPI's Query()/Body() defaults are idiomatic
+    "SIM105",  # contextlib.suppress is not clearer for one-line polling loops
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into internals deliberately, and the demo app's bugs are the point.
+"tests/*" = ["B011", "RUF012"]

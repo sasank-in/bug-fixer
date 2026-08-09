@@ -7,9 +7,9 @@ target, so it costs real requests — it is applied only to cluster exemplars.
 
 from __future__ import annotations
 
-import copy
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from autoqa.analysis.normalize import normalize
 from autoqa.fuzz.engine import TestCase

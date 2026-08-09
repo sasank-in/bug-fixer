@@ -1,13 +1,47 @@
+# Python bytecode
 __pycache__/
 *.py[cod]
-*.egg-info/
+*$py.class
+
+# Packaging / build
 build/
 dist/
-.pytest_cache/
+*.egg-info/
+.eggs/
+
+# Virtual environments
 .venv/
 venv/
+env/
+ENV/
 
-# Generated campaign output
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Generated campaign output. Reports are run artifacts, not source — CI
+# uploads them from the dogfood job rather than committing them.
 report.md
 report.json
+*.report.md
+*.report.json
+
+# The demo spec is generated from examples/vulnerable_api/app.py; see README.
 examples/vulnerable_api/openapi.json
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.qodo/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini

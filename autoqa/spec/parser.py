@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 import yaml
 
@@ -58,7 +59,7 @@ class OpenAPISpec:
         self._ref_cache: dict[str, Any] = {}
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "OpenAPISpec":
+    def from_file(cls, path: str | Path) -> OpenAPISpec:
         p = Path(path)
         raw = p.read_text(encoding="utf-8")
         if p.suffix.lower() in {".yaml", ".yml"}:

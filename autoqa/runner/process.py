@@ -16,7 +16,6 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 import httpx
 
@@ -90,7 +89,11 @@ class TargetProcess:
                 response = httpx.get(health_url, timeout=2.0)
                 if response.status_code < 500:
                     return True
-            except Exception:  # noqa: BLE001 - not up yet is the common case
+            except Exception:
+                # Intentionally broad and silent: "not listening yet" is the
+                # expected state for most of this loop, and it surfaces as a
+                # different exception per platform and transport. The timeout
+                # above is what distinguishes slow startup from real failure.
                 pass
             time.sleep(interval)
         return False
@@ -121,7 +124,7 @@ class TargetProcess:
             self._process.kill()
             self._process.wait(timeout=grace)
 
-    def __enter__(self) -> "TargetProcess":
+    def __enter__(self) -> TargetProcess:
         self.start()
         return self
 

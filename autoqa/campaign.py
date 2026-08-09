@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable
-
-import httpx
 
 from autoqa.analysis.cluster import Cluster, cluster_findings
 from autoqa.analysis.minimizer import is_minimizable, minimize, same_failure
@@ -97,7 +93,7 @@ class Campaign:
                 raise RuntimeError(
                     f"target did not become ready at {health}. "
                     f"Last output:\n"
-                    + "\n".join(l.text for l in process.all_lines()[-25:])
+                    + "\n".join(line.text for line in process.all_lines()[-25:])
                 )
             self._log("target is ready")
 

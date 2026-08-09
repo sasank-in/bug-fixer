@@ -6,8 +6,8 @@ variants, watches the server's logs while it does so, and reports the distinct
 bugs it found with a copy-pasteable reproducer for each.
 
 ```
-  FINDINGS      17 distinct issues  (critical:9  high:5  medium:3)
-                from 65 raw observations
+  FINDINGS      16 distinct issues  (critical:9  high:4  medium:3)
+                from 61 raw observations
 
 !! [2] Valid request fails with 500 on POST /transfer
      severity   critical
@@ -21,6 +21,9 @@ bugs it found with a copy-pasteable reproducer for each.
        curl -i -X POST http://127.0.0.1:8099/transfer \
          -H 'Content-Type: application/json' -d '{}'
 ```
+
+Status: the fuzz → observe → analyse → report loop works end to end. Proposing
+fixes and opening pull requests is [not built yet](#not-built-yet).
 
 ## Install
 
@@ -63,6 +66,20 @@ autoqa --spec openapi.json --url http://localhost:8000 \
 | `--include` / `--exclude` | Substring match on `METHOD /path`, repeatable. |
 | `--rate-limit N` | Requests per second, for targets you shouldn't hammer. |
 | `--fail-on SEVERITY` | Exit non-zero when something at least this bad is found. |
+
+Run `autoqa --help` for the full list.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Ran to completion. Findings may still exist — pass `--fail-on` to gate on them. |
+| `1` | A finding met or exceeded the `--fail-on` threshold. |
+| `2` | Setup failed: spec missing or unparseable, target never became ready, bad arguments. |
+| `130` | Interrupted (Ctrl-C). |
+
+Note the difference between `1` and `2`: `1` means the tool worked and your API
+has a bug; `2` means the tool never got to test anything.
 
 ## How it works
 
@@ -130,32 +147,35 @@ work. AutoQA finds them and names the line for each.
 ## Tests
 
 ```bash
-pytest              # 89 tests
-pytest -q -k e2e    # end-to-end: fuzzes the demo API and asserts on findings
+pytest                     # 150 tests, ~4s
+pytest tests/test_e2e.py   # end-to-end: fuzzes the demo API, asserts on findings
 ```
 
 The e2e suite is the meaningful one. It runs a real campaign and asserts the
 invariants that make a report trustworthy: traces attach to the operation that
 produced them, no cluster spans two operations, titles agree with their
-reproducers, and no culprit frame ever points into a dependency.
+reproducers, no culprit frame points into a dependency, and the curl reproducer
+encodes byte-for-byte the way the request was actually sent.
 
 ## Layout
 
 ```
 autoqa/
-  spec/parser.py       OpenAPI 3.x → operations, with $ref resolution
-  fuzz/generators.py   JSON Schema → conforming values
-  fuzz/mutators.py     conforming value → hostile variant
-  fuzz/engine.py       operations → concrete test cases
-  runner/executor.py   async HTTP with bounded concurrency
-  runner/process.py    launches the target, tails its output
-  analysis/traces.py   log text → stack traces (Python/JS/Java/Go)
-  analysis/oracles.py  response → findings
-  analysis/cluster.py  findings → distinct issues
-  analysis/minimizer.py delta-debugging to a minimal repro
-  report/render.py     terminal, Markdown, JSON
-  campaign.py          orchestration
-  cli.py               entry point
+  spec/parser.py         OpenAPI 3.x → operations, with $ref resolution
+  fuzz/generators.py     JSON Schema → conforming values
+  fuzz/mutators.py       conforming value → hostile variant
+  fuzz/engine.py         operations → concrete test cases
+  runner/http.py         shared encoding, so requests and repros cannot drift
+  runner/executor.py     async HTTP with bounded concurrency
+  runner/process.py      launches the target, tails its output
+  analysis/traces.py     log text → stack traces (Python/JS/Java/Go)
+  analysis/oracles.py    response → findings
+  analysis/normalize.py  shared "is this the same error?" text reduction
+  analysis/cluster.py    findings → distinct issues
+  analysis/minimizer.py  delta-debugging to a minimal repro
+  report/render.py       terminal, Markdown, JSON
+  campaign.py            orchestration
+  cli.py                 entry point
 ```
 
 ## Supported
@@ -164,16 +184,70 @@ Targets: any HTTP service with an OpenAPI 3.x spec (JSON or YAML).
 Stack traces: Python (including 3.11+ caret markers and chained exceptions),
 Node/JS, Java/JVM, Go panics.
 
+## Known limitations
+
+Worth knowing before you trust a clean run:
+
+**Security oracles are probabilistic, not guaranteed.** Hostile payloads are
+sampled at random, so any *specific* one — the `{{7*7}}` that proves template
+injection, say — reaches a given parameter with probability ~`1/22` per mutation
+of that parameter. In practice:
+
+| `--cases` | Chance a given payload is ever sent to one query param |
+| --- | --- |
+| 20 | ~37% |
+| 50 | ~68% |
+| 100 | ~90% |
+| 200 | ~99% |
+
+Crash-hunting doesn't care (any garbage triggers a `KeyError`), but injection
+detection does. **A clean run at `--cases 20` is weak evidence about injection**;
+use 100+ when that's what you're checking. A deterministic payload sweep that
+sends every security payload to every string parameter exactly once would make
+this a guarantee — that's the next thing worth building.
+
+**Traces need the target's stderr.** Without `--launch`, findings carry status
+codes and response bodies but no culprit line. Handlers that catch their own
+exceptions log nothing, so those get no trace either — correctly, since there's
+nothing to attribute.
+
+**Attribution is conservative.** Under concurrency, overlapping requests make
+some traces ambiguous; those are left unattributed rather than guessed at. You
+will see findings without a root cause even when the target did log one.
+
+**Requests are independent.** No bug requiring an ordered sequence
+(create → delete → read) is reachable.
+
 ## Not built yet
 
-From the original brief, what's deliberately still open:
+From the original brief, what's deliberately still open, roughly in the order
+worth doing:
 
-- **Proposes fixes / opens pull requests.** Deferred on purpose. The
-  deterministic core had to be trustworthy first — an LLM patch layer on top of
-  noisy findings just produces confident wrong diffs. The JSON report is shaped
-  to be its input: each cluster carries the culprit frame, the minimized repro,
-  and the evidence.
-- **Coverage-guided mutation.** Mutation is schema-aware but blind to which code
-  paths it reached. Feedback from `coverage.py` would let it steer.
-- **Stateful sequences.** Each request is independent, so bugs that need
-  create-then-read-then-delete ordering aren't reachable yet.
+1. **Deterministic payload sweep.** Send every security payload to every string
+   parameter exactly once, alongside the random mutation. Bounded cost, and it
+   turns the probability table above into a guarantee.
+2. **Stateful sequences.** Infer resource links (`POST /orders` →
+   `GET /orders/{id}`) and fuzz the sequence, not the call. This is the largest
+   capability gain — use-after-delete, broken pagination, and IDOR all live here.
+3. **Coverage-guided mutation.** Feedback from `coverage.py` would let mutation
+   steer toward unexplored branches instead of re-hitting the same handler.
+   Powerful, but only when the target is Python and runnable under coverage.
+4. **Proposes fixes / opens pull requests.** Deferred on purpose: the
+   deterministic core had to be trustworthy first, since an LLM patch layer on
+   top of noisy findings just produces confident wrong diffs. It also needs a
+   way to *verify* a fix, which is really item 2. The JSON report is already
+   shaped as its input — each cluster carries the culprit frame, the minimized
+   reproducer, and the evidence.
+
+## Development
+
+```bash
+pip install -e ".[dev,demo]"
+pytest -q                              # 150 tests, ~4s
+ruff check autoqa/ tests/ examples/    # lint
+```
+
+CI runs lint and tests on Python 3.10 and 3.13 (the trace parser is
+version-sensitive), then dogfoods the tool against the demo API and fails if it
+stops finding the planted bugs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+design rules and the encoding traps that have already caused bugs.

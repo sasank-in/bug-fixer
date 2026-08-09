@@ -28,9 +28,12 @@ def generate(schema: dict[str, Any] | None, rng: random.Random, depth: int = 0) 
         return rng.choice(enum)
     if "default" in schema and rng.random() < 0.3:
         return schema["default"]
-    if isinstance(schema.get("examples"), list) and schema["examples"]:
-        if rng.random() < 0.3:
-            return rng.choice(schema["examples"])
+    if (
+        isinstance(schema.get("examples"), list)
+        and schema["examples"]
+        and rng.random() < 0.3
+    ):
+        return rng.choice(schema["examples"])
     if "example" in schema and rng.random() < 0.3:
         return schema["example"]
 

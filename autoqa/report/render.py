@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
 
-from autoqa.analysis.cluster import Cluster
+import httpx
+
 from autoqa.analysis.oracles import Severity
 from autoqa.campaign import CampaignReport
 from autoqa.fuzz.engine import TestCase
+from autoqa.runner.http import encode_body, has_header, json_safe
 
 _SEVERITY_ICON = {
     Severity.CRITICAL: "!!",
@@ -23,26 +25,52 @@ _SEVERITY_ICON = {
 }
 
 
+def request_url(case: TestCase, base_url: str) -> str:
+    """The exact URL the executor sent, query encoding included.
+
+    Built through httpx rather than urlencode so the reproducer cannot drift
+    from what actually went over the wire. The two disagree on real cases the
+    fuzzer produces: a list encodes as repeated `?t=1&t=2` pairs (not one
+    bracketed blob), a bool as lowercase `true`, and an empty list drops the
+    parameter entirely. A reproducer that doesn't reproduce is worse than none.
+    """
+    base = base_url.rstrip("/") + case.path
+    if not case.query:
+        return base
+    try:
+        return str(httpx.URL(base).copy_merge_params(case.query))
+    except httpx.InvalidURL:
+        # Some mutations (oversized_payload) build a query httpx refuses to
+        # parse — which is itself the finding being reported. Fall back to
+        # manual encoding so the report still renders; matching httpx exactly
+        # is moot for a URL httpx would not have sent either.
+        encoded = urlencode(
+            [
+                (name, "" if value is None else str(value))
+                for name, value in case.query.items()
+            ]
+        )
+        return f"{base}?{encoded}"
+
+
 def curl_for(case: TestCase, base_url: str) -> str:
     """A copy-pasteable reproducer. The single most useful line in the report."""
-    url = base_url.rstrip("/") + case.path
-    if case.query:
-        url += "?" + urlencode(
-            {k: str(v) for k, v in case.query.items()}, doseq=False
-        )
-
-    parts = ["curl", "-i", "-X", case.method, shlex.quote(url)]
+    parts = ["curl", "-i", "-X", case.method, shlex.quote(request_url(case, base_url))]
     for name, value in case.headers.items():
         parts += ["-H", shlex.quote(f"{name}: {value}")]
     if case.body is not None:
-        try:
-            payload = json.dumps(case.body)
-        except (TypeError, ValueError):
-            payload = str(case.body)
+        # Mirror the executor exactly: only add the default content-type when
+        # the case did not carry one, or curl would receive two conflicting
+        # -H flags and honour the last, sending a different type than we did.
+        if not has_header(case.headers, "content-type"):
+            parts += ["-H", shlex.quote("Content-Type: application/json")]
+        # Same encoder the executor uses, so the repro carries the exact bytes
+        # that were sent (including non-standard Infinity/NaN).
+        payload = encode_body(case.body).decode("utf-8", "replace")
         # Keep the reproducer readable; note the elision rather than silently cutting.
         if len(payload) > 2000:
             payload = payload[:2000] + f'... /* truncated, {len(payload)} bytes total */'
-        parts += ["-H", shlex.quote("Content-Type: application/json"), "-d", shlex.quote(payload)]
+        parts += ["-d", shlex.quote(payload)]
     return " ".join(parts)
 
 
@@ -258,9 +286,12 @@ def render_json(report: CampaignReport) -> str:
                 "curl": curl_for(case, report.config.base_url),
                 "method": case.method,
                 "path": case.path,
-                "query": {k: str(v) for k, v in case.query.items()},
+                # The raw values as generated, plus the URL actually sent —
+                # str() here would misrepresent lists and bools (see request_url).
+                "query": {k: json_safe(v) for k, v in case.query.items()},
+                "url": request_url(case, report.config.base_url),
                 "headers": case.headers,
-                "body": _safe(case.body),
+                "body": json_safe(case.body),
             },
             "observed": {
                 "status": cluster.exemplar.result.status,
@@ -282,11 +313,3 @@ def render_json(report: CampaignReport) -> str:
 
     return json.dumps(payload, indent=2, default=str)
 
-
-def _safe(value: Any) -> Any:
-    """Make a possibly-hostile payload safe to embed in the JSON report."""
-    try:
-        json.dumps(value)
-        return value
-    except (TypeError, ValueError):
-        return repr(value)[:2000]

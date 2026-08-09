@@ -122,7 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
-    except Exception as exc:  # noqa: BLE001 - surface setup failures cleanly
+    except Exception as exc:
+        # Intentionally broad: setup problems (unreadable spec, target that
+        # never starts, bad URL) should print one clear line and exit 2, not
+        # dump a traceback at someone running a CLI.
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

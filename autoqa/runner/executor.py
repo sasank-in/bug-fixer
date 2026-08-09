@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
 from autoqa.fuzz.engine import TestCase
+from autoqa.runner.http import encode_body, with_default_content_type
 
 
 @dataclass
@@ -95,12 +97,12 @@ class Executor:
 
         kwargs: dict[str, Any] = {"params": case.query, "headers": headers}
         if case.body is not None:
-            # Some mutations produce values json.dumps can't encode; fall back
-            # to a raw byte body so the target still gets something hostile.
-            try:
-                kwargs["json"] = case.body
-            except (TypeError, ValueError):
-                kwargs["content"] = str(case.body).encode("utf-8", "replace")
+            # Serialize here rather than passing json= and letting httpx do it:
+            # httpx encodes with allow_nan=False, so a mutated inf/nan would
+            # raise at request time and surface as a fake "connection failure"
+            # blaming the target for our own encoding choice. See runner/http.py.
+            kwargs["headers"] = with_default_content_type(headers)
+            kwargs["content"] = encode_body(case.body)
 
         start = time.perf_counter()
         sent_at = time.time()
@@ -124,9 +126,14 @@ class Executor:
                 sent_at=sent_at,
                 received_at=time.time(),
             )
-        except Exception as exc:  # noqa: BLE001 - transport failures are findings
-            # httpx raises some transport errors with an empty message, which
-            # would render as a bare "ReadError: " in the report.
+        except Exception as exc:
+            # Intentionally broad: a transport failure IS the finding here, so
+            # every exception must become a Result rather than propagate and
+            # abort the campaign. Narrowing this would drop whole categories of
+            # bug (resets, protocol violations) that we exist to catch.
+            #
+            # httpx raises some of these with an empty message, which would
+            # render as a bare "ReadError: " in the report.
             detail = str(exc).strip()
             return Result(
                 case=case,

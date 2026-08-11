@@ -247,6 +247,19 @@ pytest -q                              # 150 tests, ~4s
 ruff check autoqa/ tests/ examples/    # lint
 ```
 
+Using conda, run through the environment explicitly so the launched target lands
+in the same interpreter as the fuzzer:
+
+```bash
+conda run -n base --no-capture-output pytest -q
+conda run -n base --no-capture-output python -m autoqa.cli --spec … --url …
+```
+
+`--launch` inherits whatever `python` resolves to on `PATH`. If that is a
+different environment than the one running AutoQA, the target will fail to
+import its own dependencies and the run aborts with "target did not become
+ready" — pass an absolute interpreter path in `--launch` if the two can differ.
+
 CI runs lint and tests on Python 3.10 and 3.13 (the trace parser is
 version-sensitive), then dogfoods the tool against the demo API and fails if it
 stops finding the planted bugs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the

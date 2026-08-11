@@ -36,25 +36,43 @@ class Cluster:
 
     @property
     def mutation_tags(self) -> list[str]:
-        tags = {
-            m.tag
-            for f in self.findings
-            for m in f.result.case.mutations
-        }
-        return sorted(tags)
+        """Mutations that triggered *the reported reproducer*, not the cluster.
+
+        Aggregating tags across every member listed mutations belonging to other
+        requests, so a report could claim `deep_nesting` for a reproducer whose
+        body is `{}`. The exemplar is what the reader will run, so it is the only
+        thing the tags may describe. `all_mutation_tags` keeps the wider view.
+        """
+        return sorted({m.tag for m in self.exemplar.result.case.mutations})
+
+    @property
+    def all_mutation_tags(self) -> list[str]:
+        """Every mutation that reached this cluster, across all members."""
+        return sorted({m.tag for f in self.findings for m in f.result.case.mutations})
 
     @property
     def exemplar(self) -> Finding:
-        """The representative finding: worst severity, then smallest payload.
+        """The representative finding — the one whose request the report prints.
 
-        Severity comes first so the exemplar always matches the title and
-        detail, which are taken from the worst member. Picking purely by size
-        could otherwise pair a critical headline with a reproducer for a
-        merely-medium instance.
+        Ordering, most important first:
+
+        1. Worst severity, so the exemplar matches the title and detail.
+        2. Fewest mutations, so blame is unambiguous.
+        3. Smallest payload, purely as a readability tiebreak.
+
+        Size used to rank above mutation count, which selected whichever member
+        happened to carry the tiniest body — frequently *not* a request that
+        triggered the failure at all. Replaying the report then produced a
+        different status than it claimed. Fidelity outranks brevity: a long
+        reproducer that works beats a short one that does not.
         """
         return min(
             self.findings,
-            key=lambda f: (f.severity.rank, len(repr(f.result.case.body or ""))),
+            key=lambda f: (
+                f.severity.rank,
+                len(f.result.case.mutations),
+                len(repr(f.result.case.body or "")),
+            ),
         )
 
     @property
@@ -169,9 +187,31 @@ def _match_trace(
     return None
 
 
+# Words that appear in handler names and route paths without identifying either.
+# Without this, `get_user` and `/files` "match" on the shared token `get`, and a
+# trace from one endpoint gets attributed to the other.
+_GENERIC_TOKENS = frozenset(
+    {
+        "get", "post", "put", "patch", "delete", "head", "options",
+        "api", "v1", "v2", "v3", "handler", "handle", "endpoint", "route",
+        "read", "write", "list", "create", "update", "fetch", "index",
+        "view", "async", "def", "func", "main", "app", "id",
+    }
+)
+
+
 def _tokens(text: str) -> set[str]:
-    """Split an identifier or path into comparable lowercase word tokens."""
-    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 2}
+    """Split an identifier or path into comparable, *identifying* word tokens.
+
+    Generic verbs are dropped: they are noise for deciding which endpoint a
+    stack frame belongs to, and treating them as signal causes cross-operation
+    trace mis-attribution.
+    """
+    return {
+        t
+        for t in re.split(r"[^a-z0-9]+", text.lower())
+        if len(t) > 2 and t not in _GENERIC_TOKENS
+    }
 
 
 def _operation_tokens(operation) -> set[str]:

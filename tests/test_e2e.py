@@ -4,12 +4,16 @@ the planted defects. This is the test that proves the whole pipeline works.
 
 import json
 import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from autoqa.campaign import Campaign, CampaignConfig
+from autoqa.report.render import request_url
+from autoqa.runner.http import encode_body, with_default_content_type
 
 pytest.importorskip("fastapi")
 pytest.importorskip("uvicorn")
@@ -165,6 +169,107 @@ def test_minimized_reproducers_still_reproduce(report):
             assert has_input or case.path != case.operation.path, (
                 f"minimized repro for {signature} dropped all input: {case}"
             )
+
+
+def test_reported_reproducers_actually_reproduce(spec_path):
+    """Replay every reported reproducer and require the claimed outcome.
+
+    The load-bearing test for the whole tool: a report whose curl lines do not
+    reproduce is worthless, and structural checks alone missed exactly that —
+    exemplar selection once picked whichever cluster member had the smallest
+    body, which was often not a request that failed at all.
+    """
+    import httpx
+
+    port = free_port()
+    config = CampaignConfig(
+        spec_path=spec_path,
+        base_url=f"http://127.0.0.1:{port}",
+        cases_per_operation=10,
+        seed=42,
+        concurrency=4,
+        timeout=6.0,
+        launch_command=(
+            f"{sys.executable} -m uvicorn examples.vulnerable_api.app:app "
+            f"--port {port} --log-level warning"
+        ),
+        launch_cwd=str(ROOT),
+        health_path="/health",
+        minimize_findings=True,
+    )
+    report = Campaign(config).run()
+    assert report.clusters
+
+    # The campaign stops its target on the way out, so bring up a fresh one to
+    # replay against.
+    replay_port = free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "examples.vulnerable_api.app:app",
+         "--port", str(replay_port), "--log-level", "error"],
+        cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{replay_port}"
+    try:
+        for _ in range(75):
+            try:
+                if httpx.get(f"{base}/health", timeout=2).status_code == 200:
+                    break
+            except Exception:
+                time.sleep(0.4)
+        else:
+            pytest.skip("replay target never became ready")
+
+        mismatches = []
+        for cluster in report.clusters:
+            case = report.minimized.get(cluster.signature) or cluster.exemplar.result.case
+            claimed = cluster.exemplar.result
+            url = request_url(case, base)
+            # Replay exactly as the executor sent it — including the default
+            # content-type, without which FastAPI rejects the body as 422 and
+            # the replay measures the test's mistake instead of the tool's.
+            headers = dict(case.headers)
+            content = None
+            if case.body is not None:
+                headers = with_default_content_type(headers)
+                content = encode_body(case.body)
+            try:
+                resp = httpx.request(
+                    case.method, url,
+                    headers=headers or None,
+                    content=content,
+                    timeout=10,
+                )
+                got, err = resp.status_code, None
+            except Exception as exc:
+                got, err = None, type(exc).__name__
+
+            # A reported transport failure has already been confirmed serially
+            # during the campaign, so it must fail at the transport level again;
+            # anything else is compared on status.
+            reproduced = (
+                err is not None if claimed.transport_error else got == claimed.status
+            )
+
+            if not reproduced:
+                mismatches.append(
+                    f"{cluster.title!r}: claimed "
+                    f"{claimed.status or claimed.transport_error}, replay gave {got or err}"
+                )
+
+        assert not mismatches, "reproducers did not reproduce:\n  " + "\n  ".join(mismatches)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_mutation_tags_describe_the_reported_reproducer(report):
+    """Tags aggregated across a cluster describe requests the reader never sees."""
+    for cluster in report.clusters:
+        exemplar_tags = {m.tag for m in cluster.exemplar.result.case.mutations}
+        assert set(cluster.mutation_tags) == exemplar_tags, (
+            f"{cluster.title!r} lists {cluster.mutation_tags} but its reproducer "
+            f"applied {sorted(exemplar_tags)}"
+        )
 
 
 def test_transport_failures_are_reported_unshrunk(report):

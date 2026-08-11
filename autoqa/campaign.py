@@ -113,6 +113,8 @@ class Campaign:
             results = await executor.run(cases)
             self._log(f"executed {len(results)} requests")
 
+            results = await self._confirm_transport_failures(results)
+
             traces: list[StackTrace] = []
             if process is not None:
                 traces = extract_traces(process.lines_since(started))
@@ -146,6 +148,65 @@ class Campaign:
         finally:
             if process is not None:
                 process.stop()
+
+    async def _confirm_transport_failures(self, results: list[Result]) -> list[Result]:
+        """Re-run each transport failure alone, and keep only those that recur.
+
+        A dropped connection is not attributable to one request. HTTP keep-alive
+        means several requests share a connection, so one payload that makes the
+        server hang up takes its innocent siblings down with it — and each of
+        those siblings then looks like its own crash. Measured on the demo API,
+        concurrency 6 produced 14 `ReadError`s where concurrency 1 produced 5;
+        the other 9 were collateral, and reporting them means shipping
+        reproducers that provably do not reproduce.
+
+        Replaying serially on a fresh connection is the only way to tell the two
+        apart. It costs one request per suspected failure, which is cheap
+        relative to the campaign and much cheaper than a false finding.
+        """
+        # Track positions, not object identity, so the merge back is unambiguous.
+        # `InvalidURL` is excluded: httpx refused to send those itself, making
+        # them per-request facts about the input rather than connection noise.
+        replayable = [
+            index
+            for index, r in enumerate(results)
+            if r.transport_error and not r.transport_error.startswith("InvalidURL")
+        ]
+        if not replayable:
+            return results
+
+        self._log(f"confirming {len(replayable)} transport failures on fresh connections")
+
+        # Concurrency 1: the whole point is to remove connection sharing.
+        verifier = Executor(
+            self.config.base_url,
+            concurrency=1,
+            timeout=self.config.timeout,
+            auth_header=self.config.auth_header,
+            rate_limit_per_sec=self.config.rate_limit_per_sec,
+        )
+
+        out = list(results)
+        dropped = 0
+        for index in replayable:
+            replayed = await verifier.run([out[index].case])
+            if not replayed:
+                continue
+            # Take the replay either way: if it still fails at the transport
+            # level the finding is real, and if it came back with a status that
+            # status is the truth (a genuine 500 can hide behind collateral
+            # damage). Its timing is also what a reader will actually see.
+            out[index] = replayed[0]
+            if not replayed[0].transport_error:
+                dropped += 1
+
+        if dropped:
+            self._log(
+                f"dropped {dropped} unconfirmed transport failure(s) "
+                f"(collateral from connection sharing, not target defects)"
+            )
+
+        return out
 
     async def _minimize_all(
         self, clusters: list[Cluster], executor: Executor

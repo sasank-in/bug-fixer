@@ -53,9 +53,28 @@ def request_url(case: TestCase, base_url: str) -> str:
         return f"{base}?{encoded}"
 
 
+# Oversized-payload mutations put 100KB into a single query value. Printed in
+# full it is unreadable and, repeated across url/query/curl, dominates the JSON
+# report — two such clusters accounted for 600KB of a 673KB file. The elision is
+# always labelled with the true length so nothing looks silently complete.
+_MAX_URL_DISPLAY = 2000
+
+
+def _elide(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...[truncated, {len(text):,} chars total]"
+
+
 def curl_for(case: TestCase, base_url: str) -> str:
-    """A copy-pasteable reproducer. The single most useful line in the report."""
-    parts = ["curl", "-i", "-X", case.method, shlex.quote(request_url(case, base_url))]
+    """A copy-pasteable reproducer. The single most useful line in the report.
+
+    Very long URLs are elided for display. Such a request is one httpx refused
+    to send anyway, so the exact bytes are not reproducible by pasting; the
+    `reproducer.query` field in the JSON report keeps the real value.
+    """
+    url = _elide(request_url(case, base_url), _MAX_URL_DISPLAY)
+    parts = ["curl", "-i", "-X", case.method, shlex.quote(url)]
     for name, value in case.headers.items():
         parts += ["-H", shlex.quote(f"{name}: {value}")]
     if case.body is not None:
@@ -289,7 +308,11 @@ def render_json(report: CampaignReport) -> str:
                 # The raw values as generated, plus the URL actually sent —
                 # str() here would misrepresent lists and bools (see request_url).
                 "query": {k: json_safe(v) for k, v in case.query.items()},
-                "url": request_url(case, report.config.base_url),
+                # Elided like the curl line; `query` above holds the full value,
+                # so nothing is lost — it just is not stored three times over.
+                "url": _elide(
+                    request_url(case, report.config.base_url), _MAX_URL_DISPLAY
+                ),
                 "headers": case.headers,
                 "body": json_safe(case.body),
             },

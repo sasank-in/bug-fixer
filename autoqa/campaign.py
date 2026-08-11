@@ -127,7 +127,11 @@ class Campaign:
 
             minimized: dict[str, TestCase] = {}
             if cfg.minimize_findings and clusters:
-                minimized = await self._minimize_all(clusters, executor)
+                # Minimization issues hundreds of single-case runs; holding one
+                # client open across them turns per-call connection setup from
+                # the dominant cost into a one-off.
+                async with executor:
+                    minimized = await self._minimize_all(clusters, executor)
 
             target_died = process is not None and not process.is_alive
             if target_died:
@@ -177,27 +181,41 @@ class Campaign:
 
         self._log(f"confirming {len(replayable)} transport failures on fresh connections")
 
-        # Concurrency 1: the whole point is to remove connection sharing.
-        verifier = Executor(
-            self.config.base_url,
-            concurrency=1,
-            timeout=self.config.timeout,
-            auth_header=self.config.auth_header,
-            rate_limit_per_sec=self.config.rate_limit_per_sec,
-        )
+        async def verify(index: int) -> tuple[int, Result | None]:
+            # A fresh single-slot Executor per replay. Isolation is the point —
+            # these must not share a connection with each other or with the main
+            # run — but they are independent, so they can still run in parallel.
+            verifier = Executor(
+                self.config.base_url,
+                concurrency=1,
+                timeout=self.config.timeout,
+                auth_header=self.config.auth_header,
+                rate_limit_per_sec=self.config.rate_limit_per_sec,
+            )
+            replayed = await verifier.run([results[index].case])
+            return index, (replayed[0] if replayed else None)
+
+        # Bound the fan-out: too many simultaneous replays would recreate the
+        # very connection pressure this pass exists to rule out.
+        semaphore = asyncio.Semaphore(min(4, self.config.concurrency))
+
+        async def guarded(index: int) -> tuple[int, Result | None]:
+            async with semaphore:
+                return await verify(index)
 
         out = list(results)
         dropped = 0
-        for index in replayable:
-            replayed = await verifier.run([out[index].case])
-            if not replayed:
+        for index, replayed in await asyncio.gather(
+            *(guarded(i) for i in replayable)
+        ):
+            if replayed is None:
                 continue
             # Take the replay either way: if it still fails at the transport
             # level the finding is real, and if it came back with a status that
             # status is the truth (a genuine 500 can hide behind collateral
             # damage). Its timing is also what a reader will actually see.
-            out[index] = replayed[0]
-            if not replayed[0].transport_error:
+            out[index] = replayed
+            if not replayed.transport_error:
                 dropped += 1
 
         if dropped:

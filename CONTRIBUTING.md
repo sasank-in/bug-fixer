@@ -2,7 +2,7 @@
 
 ```bash
 pip install -e ".[dev,demo]"
-pytest -q                     # 150 tests, ~4s
+pytest -q                     # 152 tests, ~8s
 ruff check autoqa/ tests/     # lint
 ```
 

@@ -132,6 +132,25 @@ def test_rendering_never_crashes_on_hostile_input(query):
     assert line.startswith("curl")
 
 
+def test_request_url_is_never_truncated():
+    """The fidelity guarantee lives here; only display layers may elide."""
+    case = case_with(query={"p": "B" * 50_000})
+    assert len(request_url(case, BASE)) > 50_000
+
+
+def test_curl_elides_an_enormous_url_but_says_so():
+    case = case_with(query={"p": "B" * 100_000})
+    line = curl_for(case, BASE)
+    assert len(line) < 4_000
+    assert "truncated" in line
+    assert "100," in line  # the true length is stated
+
+
+def test_short_urls_are_untouched():
+    case = case_with(query={"a": "1"})
+    assert "truncated" not in curl_for(case, BASE)
+
+
 def test_json_report_query_preserves_types():
     """str()-ing query values in the report would repeat the encoding bug."""
     from autoqa.runner.http import json_safe

@@ -55,24 +55,58 @@ class Executor:
         self._min_interval = 1.0 / rate_limit_per_sec if rate_limit_per_sec else 0.0
         self._last_send = 0.0
         self._rate_lock = asyncio.Lock()
+        # Set only while used as an async context manager; see __aenter__.
+        self._client: httpx.AsyncClient | None = None
 
-    async def run(self, cases: Iterable[TestCase]) -> list[Result]:
-        semaphore = asyncio.Semaphore(self.concurrency)
-        limits = httpx.Limits(max_connections=self.concurrency * 2)
-        # Errors are signal here, not exceptions: 5xx and timeouts are exactly
-        # what we are hunting, so nothing raises out of _send.
-        async with httpx.AsyncClient(
+    def _new_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self.timeout,
-            limits=limits,
+            limits=httpx.Limits(max_connections=self.concurrency * 2),
             follow_redirects=False,
             verify=False,
-        ) as client:
-            tasks = [
-                asyncio.create_task(self._guarded(client, semaphore, case))
-                for case in cases
-            ]
-            return list(await asyncio.gather(*tasks))
+        )
+
+    async def run(self, cases: Iterable[TestCase]) -> list[Result]:
+        """Send `cases` and return one Result each, in order.
+
+        Errors are signal here, not exceptions: 5xx and timeouts are exactly
+        what we are hunting, so nothing raises out of `_send`.
+        """
+        semaphore = asyncio.Semaphore(self.concurrency)
+        if self._client is not None:
+            return await self._dispatch(self._client, semaphore, cases)
+        async with self._new_client() as client:
+            return await self._dispatch(client, semaphore, cases)
+
+    async def _dispatch(
+        self,
+        client: httpx.AsyncClient,
+        semaphore: asyncio.Semaphore,
+        cases: Iterable[TestCase],
+    ) -> list[Result]:
+        tasks = [
+            asyncio.create_task(self._guarded(client, semaphore, case))
+            for case in cases
+        ]
+        return list(await asyncio.gather(*tasks))
+
+    async def __aenter__(self) -> Executor:
+        """Hold one client open across many `run` calls.
+
+        Verification and minimization issue hundreds of *single-case* runs. Each
+        one otherwise constructs and tears down an AsyncClient, and that setup —
+        not the request — dominates: 59 such calls cost ~37s of a 66s campaign.
+        Reusing the client also lets keep-alive do its job across replays.
+        """
+        self._client = self._new_client()
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.__aexit__(*exc)
 
     async def _guarded(
         self, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, case: TestCase

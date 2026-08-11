@@ -6,8 +6,8 @@ variants, watches the server's logs while it does so, and reports the distinct
 bugs it found with a copy-pasteable reproducer for each.
 
 ```
-  FINDINGS      16 distinct issues  (critical:9  high:4  medium:3)
-                from 61 raw observations
+  FINDINGS      14 distinct issues  (critical:5  high:6  medium:3)
+                from 58 raw observations
 
 !! [2] Valid request fails with 500 on POST /transfer
      severity   critical
@@ -65,6 +65,7 @@ autoqa --spec openapi.json --url http://localhost:8000 \
 | `--auth 'Authorization: Bearer …'` | Sent with every request. |
 | `--include` / `--exclude` | Substring match on `METHOD /path`, repeatable. |
 | `--rate-limit N` | Requests per second, for targets you shouldn't hammer. |
+| `--concurrency N` | Default 8. Higher is faster but produces more connection-level collateral, which costs extra confirmation requests to filter back out. |
 | `--fail-on SEVERITY` | Exit non-zero when something at least this bad is found. |
 
 Run `autoqa --help` for the full list.
@@ -116,17 +117,37 @@ schema-violating input accepted with a 2xx, and latency outliers measured
 against each operation's own median.
 
 **Clustering is the point.** A fuzzer hits the same bug hundreds of times. Runs
-here typically collapse ~65 raw observations into ~17 real issues, keyed on the
+here typically collapse ~58 raw observations into ~14 real issues, keyed on the
 server-side stack trace where one is available and a normalized error
 fingerprint otherwise. Two rules keep the output honest: the offending *value*
 is normalized out (so `'a.txt'` and `'../../etc/passwd'` are one bug), and the
 operation is always part of the key (so one shared helper failing on two
 endpoints never merges into a report whose title and reproducer disagree).
 
+**Transport failures are confirmed before they're reported.** A dropped
+connection isn't attributable to one request: HTTP keep-alive means several
+requests share a connection, so one payload that makes the server hang up takes
+its innocent siblings down with it — and each sibling then looks like its own
+crash. Every suspected transport failure is therefore replayed alone on a fresh
+connection, and dropped unless it recurs. On the demo API that discards ~10 of
+11, and it also unmasks real 500s that were hiding behind the collateral.
+
 **Minimization.** Each cluster's exemplar is delta-debugged against the live
 target until it's the smallest request that still fails the same way. Transport
 failures are deliberately skipped — with no status and no body, "same failure"
 can't be verified, and a shrunk repro that doesn't reproduce is worse than none.
+
+### Cost
+
+Confirmation and minimization both replay against the live target, so a campaign
+sends more requests than `operations × (cases + 1)`. At `--cases 30` on the demo
+API that is ~217 fuzz requests plus ~90 replays, about 25–35s end to end.
+
+Two flags dominate the wall clock. `--timeout` is paid in full every time a
+genuine hang is re-confirmed, and `--concurrency` trades speed for connection
+collateral that the confirmation pass then has to replay away. For CI, lower
+both (`--timeout 5 --concurrency 4`) rather than raising the job limit. Pass
+`--no-minimize` to skip the longest phase when you only need the finding list.
 
 ## Try it
 
@@ -147,7 +168,7 @@ work. AutoQA finds them and names the line for each.
 ## Tests
 
 ```bash
-pytest                     # 150 tests, ~4s
+pytest                     # 152 tests, ~8s
 pytest tests/test_e2e.py   # end-to-end: fuzzes the demo API, asserts on findings
 ```
 
@@ -243,7 +264,7 @@ worth doing:
 
 ```bash
 pip install -e ".[dev,demo]"
-pytest -q                              # 150 tests, ~4s
+pytest -q                              # 152 tests, ~8s
 ruff check autoqa/ tests/ examples/    # lint
 ```
 

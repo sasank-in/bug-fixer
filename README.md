@@ -28,8 +28,17 @@ fixes and opening pull requests is [not built yet](#not-built-yet).
 ## Install
 
 ```bash
-pip install -e ".[dev,demo]"
+pip install -e ".[dev,demo]"      # recommended: reads pyproject.toml
 ```
+
+Requirements files are provided for environments that expect them:
+
+```bash
+pip install -r requirements.txt        # runtime only — enough to run the CLI
+pip install -r requirements-dev.txt    # adds tests, lint, and the demo API
+```
+
+`pyproject.toml` is the source of truth; the requirements files mirror it.
 
 ## Use
 

@@ -22,6 +22,10 @@ dev = [
 demo = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # The demo app imports pydantic directly for its request models. FastAPI
+    # depends on it transitively, but relying on that would break the demo if
+    # FastAPI ever swapped it out.
+    "pydantic>=2.0",
 ]
 
 [project.scripts]

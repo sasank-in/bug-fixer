@@ -75,6 +75,7 @@ autoqa --spec openapi.json --url http://localhost:8000 \
 | `--include` / `--exclude` | Substring match on `METHOD /path`, repeatable. |
 | `--rate-limit N` | Requests per second, for targets you shouldn't hammer. |
 | `--concurrency N` | Default 8. Higher is faster but produces more connection-level collateral, which costs extra confirmation requests to filter back out. |
+| `--no-security-sweep` | Drops the deterministic injection probes. Faster, but injection coverage goes back to depending on `--cases`. |
 | `--fail-on SEVERITY` | Exit non-zero when something at least this bad is found. |
 
 Run `autoqa --help` for the full list.
@@ -124,6 +125,20 @@ hangs, internal detail leaking into response bodies (stack traces, SQL errors,
 filesystem paths, secrets), payloads that were *evaluated* rather than echoed,
 schema-violating input accepted with a 2xx, and latency outliers measured
 against each operation's own median.
+
+**Security coverage is a guarantee, not a probability.** Random mutation is fine
+for crash-hunting — almost any garbage triggers an unhandled `KeyError`, so the
+exact value rarely matters. Injection is the opposite: only `{{7*7}}` proves
+template injection, and sampling it at random made detection a lottery (~37%
+after 20 cases). So alongside the random cases, every security payload is sent
+to every string-ish parameter exactly once. Cost is `targets * payloads`,
+independent of `--cases`, and the result is identical on every seed. Disable
+with `--no-security-sweep`.
+
+Detection requires the payload to have been *acted on*, never merely reflected:
+an API that echoes `{{7*7}}` back is fine, one that answers `49` is not. Numeric
+proofs are word-boundary anchored and require the payload to be absent from the
+response — without that, the `49` inside `324286.6249` reads as an evaluation.
 
 **Clustering is the point.** A fuzzer hits the same bug hundreds of times. Runs
 here typically collapse ~58 raw observations into ~14 real issues, keyed on the
@@ -177,7 +192,7 @@ work. AutoQA finds them and names the line for each.
 ## Tests
 
 ```bash
-pytest                     # 152 tests, ~8s
+pytest                     # full suite, ~10s
 pytest tests/test_e2e.py   # end-to-end: fuzzes the demo API, asserts on findings
 ```
 
@@ -218,23 +233,12 @@ Node/JS, Java/JVM, Go panics.
 
 Worth knowing before you trust a clean run:
 
-**Security oracles are probabilistic, not guaranteed.** Hostile payloads are
-sampled at random, so any *specific* one — the `{{7*7}}` that proves template
-injection, say — reaches a given parameter with probability ~`1/22` per mutation
-of that parameter. In practice:
-
-| `--cases` | Chance a given payload is ever sent to one query param |
-| --- | --- |
-| 20 | ~37% |
-| 50 | ~68% |
-| 100 | ~90% |
-| 200 | ~99% |
-
-Crash-hunting doesn't care (any garbage triggers a `KeyError`), but injection
-detection does. **A clean run at `--cases 20` is weak evidence about injection**;
-use 100+ when that's what you're checking. A deterministic payload sweep that
-sends every security payload to every string parameter exactly once would make
-this a guarantee — that's the next thing worth building.
+**Injection coverage is bounded by the payload list, not by luck.** The
+deterministic sweep guarantees every payload in `autoqa/fuzz/sweep.py` reaches
+every string-ish parameter — but a vulnerability needing a payload that is not
+on that list still goes unfound, and the sweep only probes parameters the spec
+declares. A free-form object body is probed with common key names, which is a
+guess.
 
 **Traces need the target's stderr.** Without `--launch`, findings carry status
 codes and response bodies but no culprit line. Handlers that catch their own
@@ -253,16 +257,13 @@ will see findings without a root cause even when the target did log one.
 From the original brief, what's deliberately still open, roughly in the order
 worth doing:
 
-1. **Deterministic payload sweep.** Send every security payload to every string
-   parameter exactly once, alongside the random mutation. Bounded cost, and it
-   turns the probability table above into a guarantee.
-2. **Stateful sequences.** Infer resource links (`POST /orders` →
+1. **Stateful sequences.** Infer resource links (`POST /orders` →
    `GET /orders/{id}`) and fuzz the sequence, not the call. This is the largest
    capability gain — use-after-delete, broken pagination, and IDOR all live here.
-3. **Coverage-guided mutation.** Feedback from `coverage.py` would let mutation
+2. **Coverage-guided mutation.** Feedback from `coverage.py` would let mutation
    steer toward unexplored branches instead of re-hitting the same handler.
    Powerful, but only when the target is Python and runnable under coverage.
-4. **Proposes fixes / opens pull requests.** Deferred on purpose: the
+3. **Proposes fixes / opens pull requests.** Deferred on purpose: the
    deterministic core had to be trustworthy first, since an LLM patch layer on
    top of noisy findings just produces confident wrong diffs. It also needs a
    way to *verify* a fix, which is really item 2. The JSON report is already
@@ -273,7 +274,7 @@ worth doing:
 
 ```bash
 pip install -e ".[dev,demo]"
-pytest -q                              # 152 tests, ~8s
+pytest -q                              # full suite, ~10s
 ruff check autoqa/ tests/ examples/    # lint
 ```
 

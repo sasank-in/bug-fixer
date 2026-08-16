@@ -70,11 +70,80 @@ _LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str], Severity], ...] = (
     ("debug_mode", re.compile(r"(?i)(werkzeug debugger|DEBUG = True|django\.core\.exceptions)"), Severity.MEDIUM),
 )
 
-# Reflected payloads that indicate injection reached a sink.
-_INJECTION_MARKERS: tuple[tuple[str, str, Severity], ...] = (
-    ("template_injection", "49", Severity.CRITICAL),  # {{7*7}} evaluated
-    ("path_traversal", "root:x:0:0", Severity.CRITICAL),
-    ("path_traversal_win", "[fonts]", Severity.CRITICAL),
+@dataclass(frozen=True)
+class _Probe:
+    """What proves a payload was *executed* rather than echoed back.
+
+    `trigger` is a substring of what we sent; `markers` are regexes whose match
+    in the response can only be explained by the server acting on the payload.
+    The distinction matters: an API that reflects `{{7*7}}` verbatim is fine,
+    while one that answers `49` has an expression evaluator wired to user input.
+
+    Markers are regexes rather than plain substrings because the arithmetic
+    proofs are short numbers. A bare `"49" in body` check matched the `49`
+    inside `324286.6249` and reported a clean echo endpoint as critically
+    vulnerable — so numeric markers must be anchored to a word boundary, and
+    the payload must be absent from the response entirely before an evaluation
+    claim is credible.
+    """
+
+    kind: str
+    trigger: str
+    markers: tuple[re.Pattern[str], ...]
+    severity: Severity
+    explanation: str
+    # True when the proof is "this value was computed". If the response still
+    # contains the raw payload, it was echoed, not evaluated.
+    requires_payload_absent: bool = False
+
+
+# Ordered roughly by how load-bearing each proof is. Every marker here must be
+# something the payload itself does not contain, or reflection alone would
+# raise a false alarm — `oracle_injection_reflection` enforces that too.
+_PROBES: tuple[_Probe, ...] = (
+    # File-content proofs are long and distinctive, so a plain match is safe.
+    _Probe(
+        "path_traversal", "etc/passwd",
+        (re.compile(r"root:x:0:0"), re.compile(r"daemon:x:\d")),
+        Severity.CRITICAL,
+        "the response contains /etc/passwd content, so the path was resolved on disk",
+    ),
+    _Probe(
+        "path_traversal_win", "win.ini",
+        (re.compile(r"\[fonts\]", re.I), re.compile(r"\[extensions\]", re.I)),
+        Severity.CRITICAL,
+        "the response contains win.ini content, so the path was resolved on disk",
+    ),
+    _Probe(
+        "xxe", "file:///etc/passwd",
+        (re.compile(r"root:x:0:0"),),
+        Severity.CRITICAL,
+        "the XML entity was expanded and read a local file",
+    ),
+    # Arithmetic proofs are two digits, so they need a word boundary AND the
+    # raw payload must be gone from the response — otherwise a plain echo of
+    # "{{7*7}}" alongside any incidental "49" reads as an evaluation.
+    _Probe(
+        "template_injection", "{{7*7}}",
+        (re.compile(r"(?<![\w.])49(?![\w.])"),),
+        Severity.CRITICAL,
+        "the template expression was evaluated instead of echoed",
+        requires_payload_absent=True,
+    ),
+    _Probe(
+        "expression_injection", "${7*7}",
+        (re.compile(r"(?<![\w.])49(?![\w.])"),),
+        Severity.CRITICAL,
+        "the expression was evaluated instead of echoed",
+        requires_payload_absent=True,
+    ),
+    _Probe(
+        "command_injection", "echo 49",
+        (re.compile(r"(?<![\w.])49(?![\w.])"),),
+        Severity.CRITICAL,
+        "the shell command ran and its output reached the response",
+        requires_payload_absent=True,
+    ),
 )
 
 
@@ -176,36 +245,51 @@ def oracle_information_leak(result: Result) -> list[Finding]:
 
 
 def oracle_injection_reflection(result: Result) -> list[Finding]:
-    """A payload that got *evaluated* rather than echoed is a confirmed injection."""
+    """A payload that got *evaluated* rather than echoed is a confirmed injection.
+
+    Two conditions must both hold, and the second is what keeps this honest: we
+    must have sent the trigger, and the proof marker must appear in the response
+    while being absent from everything we sent. Without that second check an API
+    that simply echoes input back would be reported as vulnerable.
+    """
     if not result.body_text or result.case.is_baseline:
         return []
+
     sent = " ".join(str(m.value) for m in result.case.mutations)
+    if not sent:
+        return []
+
     findings: list[Finding] = []
-    for kind, marker, severity in _INJECTION_MARKERS:
-        # Only meaningful if we actually sent the corresponding payload and the
-        # marker is in the response but was NOT part of what we sent.
-        if marker in result.body_text and marker not in sent:
-            trigger = {
-                "template_injection": "{{7*7}}",
-                "path_traversal": "etc/passwd",
-                "path_traversal_win": "win.ini",
-            }[kind]
-            if trigger not in sent:
+    for probe in _PROBES:
+        if probe.trigger not in sent:
+            continue
+        # An echoed payload is correct behaviour. Only a response with the
+        # payload *gone* and the computed value present proves evaluation.
+        if probe.requires_payload_absent and probe.trigger in result.body_text:
+            continue
+        for pattern in probe.markers:
+            match = pattern.search(result.body_text)
+            if not match or pattern.search(sent):
                 continue
+            marker = match.group(0)
             findings.append(
                 Finding(
-                    kind=kind,
-                    severity=severity,
-                    title=f"Possible {kind.replace('_', ' ')} on {result.case.operation.key}",
+                    kind=probe.kind,
+                    severity=probe.severity,
+                    title=(
+                        f"{probe.kind.replace('_', ' ').title()} on "
+                        f"{result.case.operation.key}"
+                    ),
                     detail=(
-                        f"Sent payload containing '{trigger}' and the response contains "
-                        f"'{marker}', suggesting the payload was evaluated or resolved "
-                        f"server-side rather than treated as data."
+                        f"Sent a payload containing {probe.trigger!r}; "
+                        f"{probe.explanation}. The response contains {marker!r}, "
+                        f"which was not part of the request."
                     ),
                     result=result,
                     evidence=[result.body_text[:400]],
                 )
             )
+            break  # one confirmation per probe is enough
     return findings
 
 

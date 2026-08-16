@@ -71,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-minimize", action="store_true",
         help="skip reproducer minimization (faster, less actionable output)",
     )
+    parser.add_argument(
+        "--no-security-sweep", action="store_true",
+        help=(
+            "skip the deterministic security probes; injection coverage then "
+            "depends on --cases and is no longer guaranteed"
+        ),
+    )
     parser.add_argument("--md", default=None, help="write a Markdown report to this path")
     parser.add_argument("--json", dest="json_out", default=None, help="write a JSON report")
     parser.add_argument(
@@ -111,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         exclude=args.exclude,
         minimize_findings=not args.no_minimize,
         rate_limit_per_sec=args.rate_limit,
+        security_sweep=not args.no_security_sweep,
     )
 
     def progress(message: str) -> None:

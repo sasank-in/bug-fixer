@@ -12,6 +12,7 @@ from autoqa.analysis.minimizer import is_minimizable, minimize, same_failure
 from autoqa.analysis.oracles import Finding, evaluate
 from autoqa.analysis.traces import StackTrace, extract_traces
 from autoqa.fuzz.engine import TestCase, build_cases
+from autoqa.fuzz.sweep import SECURITY_PAYLOADS, build_sweep_cases
 from autoqa.runner.executor import Executor, Result
 from autoqa.runner.process import TargetProcess
 from autoqa.spec.parser import OpenAPISpec, Operation
@@ -33,6 +34,10 @@ class CampaignConfig:
     exclude: list[str] = field(default_factory=list)
     minimize_findings: bool = True
     rate_limit_per_sec: float | None = None
+    # Send every security payload to every string parameter exactly once, on
+    # top of the random cases. Makes injection coverage a guarantee rather than
+    # a function of --cases; see autoqa/fuzz/sweep.py.
+    security_sweep: bool = True
 
 
 @dataclass
@@ -102,6 +107,16 @@ class Campaign:
                 build_cases(operations, cfg.cases_per_operation, cfg.seed)
             )
             self._log(f"generated {len(cases)} test cases")
+
+            if cfg.security_sweep:
+                sweep = list(build_sweep_cases(operations, cfg.seed))
+                if sweep:
+                    self._log(
+                        f"+{len(sweep)} deterministic security probes "
+                        f"({len(SECURITY_PAYLOADS)} payloads x "
+                        f"{len(sweep) // len(SECURITY_PAYLOADS)} injectable targets)"
+                    )
+                    cases += sweep
 
             executor = Executor(
                 cfg.base_url,

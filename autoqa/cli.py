@@ -72,6 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip reproducer minimization (faster, less actionable output)",
     )
     parser.add_argument(
+        "--no-sequences", action="store_true",
+        help=(
+            "skip stateful sequence fuzzing; use-after-delete and "
+            "non-idempotent transitions then go unreachable"
+        ),
+    )
+    parser.add_argument(
         "--no-security-sweep", action="store_true",
         help=(
             "skip the deterministic security probes; injection coverage then "
@@ -119,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         minimize_findings=not args.no_minimize,
         rate_limit_per_sec=args.rate_limit,
         security_sweep=not args.no_security_sweep,
+        stateful_sequences=not args.no_sequences,
     )
 
     def progress(message: str) -> None:

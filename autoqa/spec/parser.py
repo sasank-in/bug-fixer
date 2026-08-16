@@ -34,10 +34,36 @@ class Operation:
     body_schema: dict[str, Any] | None = None
     body_required: bool = False
     security: tuple[str, ...] = ()
+    # Success-response schema, keyed by status code. Sequence fuzzing needs it
+    # to know that `POST /notes` returns an object with an `id` that
+    # `GET /notes/{note_id}` will accept.
+    response_schemas: tuple[tuple[str, dict[str, Any]], ...] = ()
 
     @property
     def key(self) -> str:
         return f"{self.method.upper()} {self.path}"
+
+    @property
+    def path_params(self) -> tuple[Parameter, ...]:
+        return tuple(p for p in self.parameters if p.location == "path")
+
+    @property
+    def collection_path(self) -> str:
+        """The path with its trailing `/{param}` removed, if it has one.
+
+        `/notes/{note_id}` -> `/notes`, which is how an item operation is
+        matched to the collection operation that creates its resources.
+        """
+        if self.path.endswith("}") and "/{" in self.path:
+            return self.path[: self.path.rindex("/{")]
+        return self.path
+
+    def success_schema(self) -> dict[str, Any] | None:
+        """Schema of the first 2xx response that declares one."""
+        for status, schema in self.response_schemas:
+            if status.startswith("2") and schema:
+                return schema
+        return None
 
 
 class SpecError(ValueError):
@@ -158,6 +184,7 @@ class OpenAPISpec:
                     body_schema=body_schema,
                     body_required=body_required,
                     security=security,
+                    response_schemas=self._responses(op.get("responses")),
                 )
 
     def _parameters(self, raw: Any) -> list[Parameter]:
@@ -181,6 +208,22 @@ class OpenAPISpec:
                 )
             )
         return out
+
+    def _responses(self, raw: Any) -> tuple[tuple[str, dict[str, Any]], ...]:
+        """Extract each response's JSON schema, keyed by status code."""
+        if not isinstance(raw, dict):
+            return ()
+        out: list[tuple[str, dict[str, Any]]] = []
+        for status, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            content = self.resolve(entry).get("content") or {}
+            for media_type in ("application/json", "text/json", "*/*"):
+                payload = content.get(media_type)
+                if isinstance(payload, dict) and isinstance(payload.get("schema"), dict):
+                    out.append((str(status), payload["schema"]))
+                    break
+        return tuple(out)
 
     def _request_body(self, raw: Any) -> tuple[dict[str, Any] | None, bool]:
         if not isinstance(raw, dict):

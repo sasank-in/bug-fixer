@@ -10,11 +10,14 @@ from dataclasses import dataclass, field
 from autoqa.analysis.cluster import Cluster, cluster_findings
 from autoqa.analysis.minimizer import is_minimizable, minimize, same_failure
 from autoqa.analysis.oracles import Finding, evaluate
+from autoqa.analysis.sequence_oracles import evaluate_sequence
 from autoqa.analysis.traces import StackTrace, extract_traces
 from autoqa.fuzz.engine import TestCase, build_cases
+from autoqa.fuzz.sequences import build_sequences, discover_resources
 from autoqa.fuzz.sweep import SECURITY_PAYLOADS, build_sweep_cases
 from autoqa.runner.executor import Executor, Result
 from autoqa.runner.process import TargetProcess
+from autoqa.runner.sequence_runner import SequenceRun, SequenceRunner
 from autoqa.spec.parser import OpenAPISpec, Operation
 
 
@@ -38,6 +41,10 @@ class CampaignConfig:
     # top of the random cases. Makes injection coverage a guarantee rather than
     # a function of --cases; see autoqa/fuzz/sweep.py.
     security_sweep: bool = True
+    # Chain requests so later steps act on state earlier ones created. Finds
+    # use-after-delete and non-idempotent transitions that independent requests
+    # cannot reach; see autoqa/fuzz/sequences.py.
+    stateful_sequences: bool = True
 
 
 @dataclass
@@ -52,6 +59,7 @@ class CampaignReport:
     duration_s: float
     target_died: bool = False
     minimized: dict[str, TestCase] = field(default_factory=dict)
+    sequence_runs: list[SequenceRun] = field(default_factory=list)
 
     @property
     def total_requests(self) -> int:
@@ -137,6 +145,13 @@ class Campaign:
                     self._log(f"extracted {len(traces)} stack traces from target logs")
 
             findings = evaluate(results)
+
+            sequence_runs: list[SequenceRun] = []
+            if cfg.stateful_sequences:
+                sequence_runs = await self._run_sequences(operations, executor)
+                for run in sequence_runs:
+                    findings.extend(evaluate_sequence(run))
+
             clusters = cluster_findings(findings, traces)
             self._log(f"{len(findings)} findings in {len(clusters)} distinct clusters")
 
@@ -163,10 +178,45 @@ class Campaign:
                 duration_s=time.time() - started,
                 target_died=target_died,
                 minimized=minimized,
+                sequence_runs=sequence_runs,
             )
         finally:
             if process is not None:
                 process.stop()
+
+    async def _run_sequences(
+        self, operations: list[Operation], executor: Executor
+    ) -> list[SequenceRun]:
+        """Discover resources, then run each abuse pattern against them."""
+        resources = discover_resources(operations)
+        if not resources:
+            self._log("no create+act resource pairs found; skipping sequences")
+            return []
+
+        planned = [seq for r in resources for seq in build_sequences(r)]
+        if not planned:
+            return []
+
+        self._log(
+            f"running {len(planned)} stateful sequences across "
+            f"{len(resources)} resource(s)"
+        )
+
+        # Sequences must run in order on shared state, so one client is held
+        # open across the whole set rather than rebuilt per step.
+        runner = SequenceRunner(executor, seed=self.config.seed)
+        runs: list[SequenceRun] = []
+        async with executor:
+            for index, sequence in enumerate(planned):
+                runs.append(await runner.run(sequence, index))
+
+        aborted = sum(1 for r in runs if not r.completed)
+        if aborted:
+            self._log(
+                f"{aborted} sequence(s) could not complete "
+                f"(setup step failed, so later steps had no resource to act on)"
+            )
+        return runs
 
     async def _confirm_transport_failures(self, results: list[Result]) -> list[Result]:
         """Re-run each transport failure alone, and keep only those that recur.

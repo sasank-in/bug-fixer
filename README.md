@@ -76,6 +76,7 @@ autoqa --spec openapi.json --url http://localhost:8000 \
 | `--rate-limit N` | Requests per second, for targets you shouldn't hammer. |
 | `--concurrency N` | Default 8. Higher is faster but produces more connection-level collateral, which costs extra confirmation requests to filter back out. |
 | `--no-security-sweep` | Drops the deterministic injection probes. Faster, but injection coverage goes back to depending on `--cases`. |
+| `--no-sequences` | Drops stateful sequence fuzzing. Use-after-delete and non-idempotent transitions then go unreachable. |
 | `--fail-on SEVERITY` | Exit non-zero when something at least this bad is found. |
 
 Run `autoqa --help` for the full list.
@@ -139,6 +140,20 @@ Detection requires the payload to have been *acted on*, never merely reflected:
 an API that echoes `{{7*7}}` back is fine, one that answers `49` is not. Numeric
 proofs are word-boundary anchored and require the payload to be absent from the
 response — without that, the `49` inside `324286.6249` reads as an evaluation.
+
+**Stateful sequences.** Independent requests cannot reach use-after-delete,
+double-delete, or non-idempotent state machines: every endpoint handles a fresh
+request correctly and only misbehaves on state a previous request created.
+AutoQA groups operations into resources by path (`/notes`, `/notes/{id}`,
+`/notes/{id}/publish` are one resource), then runs abuse patterns against them —
+create-then-delete-twice, create-delete-read, repeat-an-action. Ids cannot be
+known in advance, so each chain is resolved as it runs: the create step's
+response is parsed and its id substituted into later steps.
+
+Measured on `examples/crud_api/`: sequences at `--cases 5` find both planted
+stateful crashes; single-request fuzzing at `--cases 50` finds neither. That
+gap is a reachability difference, not a sampling-budget one, and
+`tests/test_e2e_sequences.py` asserts it. Disable with `--no-sequences`.
 
 **Clustering is the point.** A fuzzer hits the same bug hundreds of times. Runs
 here typically collapse ~58 raw observations into ~14 real issues, keyed on the
@@ -249,25 +264,31 @@ nothing to attribute.
 some traces ambiguous; those are left unattributed rather than guessed at. You
 will see findings without a root cause even when the target did log one.
 
-**Requests are independent.** No bug requiring an ordered sequence
-(create → delete → read) is reachable.
+**Sequence patterns are hand-written and single-resource.** The abuse patterns
+in `autoqa/fuzz/sequences.py` are a fixed list, and every chain operates on one
+resource. Cross-resource authorization bugs (IDOR between two users) and
+pagination invariants are not probed. A resource is only discovered when the
+spec declares a `POST /things` collection alongside a `/things/{id}` item
+operation; APIs that name their paths differently are skipped.
 
 ## Not built yet
 
 From the original brief, what's deliberately still open, roughly in the order
 worth doing:
 
-1. **Stateful sequences.** Infer resource links (`POST /orders` →
-   `GET /orders/{id}`) and fuzz the sequence, not the call. This is the largest
-   capability gain — use-after-delete, broken pagination, and IDOR all live here.
+1. **Richer sequence patterns.** The abuse patterns are a hand-written list and
+   every chain stays within one resource. Cross-resource chains (create a note
+   as user A, read it as user B) would reach IDOR, which single-resource
+   sequences structurally cannot. Pagination invariants are also unprobed.
 2. **Coverage-guided mutation.** Feedback from `coverage.py` would let mutation
    steer toward unexplored branches instead of re-hitting the same handler.
    Powerful, but only when the target is Python and runnable under coverage.
 3. **Proposes fixes / opens pull requests.** Deferred on purpose: the
    deterministic core had to be trustworthy first, since an LLM patch layer on
    top of noisy findings just produces confident wrong diffs. It also needs a
-   way to *verify* a fix, which is really item 2. The JSON report is already
-   shaped as its input — each cluster carries the culprit frame, the minimized
+   way to *verify* a fix — which sequences now make possible, since a fix can be
+   checked against the chain that exposed the bug. The JSON report is already
+   shaped as its input: each cluster carries the culprit frame, the minimized
    reproducer, and the evidence.
 
 ## Development

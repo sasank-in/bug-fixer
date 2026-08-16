@@ -76,6 +76,11 @@ class CampaignReport:
 
 ProgressHook = Callable[[str], None]
 
+# Replays per (operation, error-class) group during transport confirmation.
+# More than one guards against a flaky single sample; many more just re-proves
+# the same fact at the cost of a full --timeout each.
+MAX_CONFIRMATIONS_PER_GROUP = 2
+
 
 class Campaign:
     def __init__(self, config: CampaignConfig, on_progress: ProgressHook | None = None) -> None:
@@ -244,7 +249,38 @@ class Campaign:
         if not replayable:
             return results
 
-        self._log(f"confirming {len(replayable)} transport failures on fresh connections")
+        # Confirming every suspect individually is enormous waste when they are
+        # the same defect. One run produced 120 timeouts that clustered into 5
+        # issues: 120 replays, each burning the full --timeout, to establish 5
+        # facts. Confirmation happens before clustering and so cannot see that,
+        # but suspects can be grouped by the same key clustering will use.
+        #
+        # Sampling is sound in one direction only. If a sample still fails, the
+        # input class genuinely fails and its siblings inherit the verdict. If
+        # every sample comes back clean the group was collateral, and *all* its
+        # members are replaced by their replays rather than kept on the strength
+        # of an unverified original.
+        groups: dict[tuple[str, str], list[int]] = {}
+        for index in replayable:
+            result = results[index]
+            key = (
+                result.case.operation.key,
+                (result.transport_error or "").split(":")[0],
+            )
+            groups.setdefault(key, []).append(index)
+
+        sampled = [i for indices in groups.values() for i in indices[:MAX_CONFIRMATIONS_PER_GROUP]]
+        skipped = len(replayable) - len(sampled)
+        self._log(
+            f"confirming {len(sampled)} transport failures on fresh connections"
+            + (
+                f" ({skipped} inherit their group's verdict across "
+                f"{len(groups)} operation/error groups)"
+                if skipped
+                else ""
+            )
+        )
+        replayable = sampled
 
         async def verify(index: int) -> tuple[int, Result | None]:
             # A fresh single-slot Executor per replay. Isolation is the point —
@@ -269,7 +305,7 @@ class Campaign:
                 return await verify(index)
 
         out = list(results)
-        dropped = 0
+        verdicts: dict[int, bool] = {}
         for index, replayed in await asyncio.gather(
             *(guarded(i) for i in replayable)
         ):
@@ -280,8 +316,24 @@ class Campaign:
             # status is the truth (a genuine 500 can hide behind collateral
             # damage). Its timing is also what a reader will actually see.
             out[index] = replayed
-            if not replayed.transport_error:
-                dropped += 1
+            verdicts[index] = bool(replayed.transport_error)
+
+        dropped = 0
+        for indices in groups.values():
+            tested = [i for i in indices if i in verdicts]
+            if not tested:
+                continue
+            confirmed = any(verdicts[i] for i in tested)
+            for index in indices:
+                if index in verdicts:
+                    dropped += 0 if verdicts[index] else 1
+                    continue
+                # Unsampled sibling. A confirmed group keeps its members as-is;
+                # an unconfirmed one must not leave them reported on the
+                # strength of an original we now believe was collateral.
+                if not confirmed:
+                    out[index] = out[tested[0]]
+                    dropped += 1
 
         if dropped:
             self._log(

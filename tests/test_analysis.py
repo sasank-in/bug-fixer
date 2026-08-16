@@ -284,6 +284,35 @@ def test_transport_failures_are_not_minimizable():
     assert is_minimizable(make_result(status=500, body_text="boom"))
 
 
+async def test_minimize_respects_its_probe_budget():
+    """One hanging endpoint must not let minimization dominate the campaign."""
+    case = CaseBuilder(OP, random.Random(5)).baseline()
+    case.body = {f"k{i}": "x" * 100 for i in range(20)}
+    case.query = {f"q{i}": "v" for i in range(10)}
+    probes = 0
+
+    async def still_fails(_candidate) -> bool:
+        nonlocal probes
+        probes += 1
+        return True  # everything "works", so the search would run unbounded
+
+    await minimize(case, still_fails, max_probes=7)
+    assert probes <= 7
+
+
+async def test_partially_minimized_case_still_reproduces():
+    """Stopping early is safe: every accepted step was itself confirmed."""
+    case = CaseBuilder(OP, random.Random(6)).baseline()
+    case.body = {"keep": -1, "noise": "x" * 500}
+    case.query = {}
+
+    async def still_fails(candidate) -> bool:
+        return isinstance(candidate.body, dict) and candidate.body.get("keep") == -1
+
+    result = await minimize(case, still_fails, max_probes=2)
+    assert await still_fails(result)
+
+
 async def test_minimize_keeps_case_when_nothing_can_be_removed():
     case = CaseBuilder(OP, random.Random(4)).baseline()
     case.body = {"a": 1}

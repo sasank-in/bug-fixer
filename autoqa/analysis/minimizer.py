@@ -20,6 +20,14 @@ Predicate = Callable[[TestCase], Awaitable[bool]]
 
 MAX_ROUNDS = 6
 
+# Ceiling on live requests spent shrinking one reproducer. Each round offers
+# up to ~18 candidates and every one is a sequential round-trip, so an
+# unbounded search can spend 100+ requests on a single finding — and when the
+# endpoint under test hangs, each of those costs the full --timeout. Shrinking
+# is a nicety; the unshrunk reproducer still reproduces, so it is right to stop
+# early rather than let one finding dominate the campaign.
+MAX_PROBES_PER_CASE = 40
+
 
 def is_minimizable(original: Result) -> bool:
     """Whether shrinking this failure can produce a trustworthy reproducer.
@@ -71,14 +79,25 @@ def _body_fingerprint(body: str) -> str:
     return " ".join(normalize(body[:400]).split())
 
 
-async def minimize(case: TestCase, still_fails: Predicate) -> TestCase:
-    """Greedily simplify a case while `still_fails` keeps returning True."""
+async def minimize(
+    case: TestCase, still_fails: Predicate, max_probes: int = MAX_PROBES_PER_CASE
+) -> TestCase:
+    """Greedily simplify a case while `still_fails` keeps returning True.
+
+    Stops at `max_probes` live requests. Returning a partially-shrunk case is
+    fine — every intermediate value was itself confirmed to still fail, so the
+    result reproduces regardless of where the search stopped.
+    """
     current = case
+    probes = 0
 
     for _ in range(MAX_ROUNDS):
         simplified = False
 
         for candidate in _candidates(current):
+            if probes >= max_probes:
+                return current
+            probes += 1
             if await still_fails(candidate):
                 current = candidate
                 simplified = True

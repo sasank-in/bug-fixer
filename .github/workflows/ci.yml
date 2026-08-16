@@ -62,7 +62,9 @@ jobs:
         # --timeout 5 keeps confirmation of a genuine hang from costing the full
         # default 10s each; --concurrency 4 reduces the connection-level
         # collateral that the confirmation pass then has to replay away.
-        timeout-minutes: 8
+        # ~50s locally; the margin is for a slower shared runner, not for the
+        # campaign to grow into.
+        timeout-minutes: 10
         run: |
           python -m autoqa.cli \
             --spec openapi.json --url http://127.0.0.1:8099 \

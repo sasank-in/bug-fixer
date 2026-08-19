@@ -24,6 +24,17 @@ from autoqa.fix.patcher import (
 )
 from autoqa.fix.verify import Verdict, _same_failure, load_report
 
+
+@pytest.fixture(autouse=True)
+def isolate_dotenv(tmp_path, monkeypatch):
+    """Keep the repo's real .env out of every test in this module.
+
+    find_api_key() searches upward from the CWD for a .env, so without this a
+    developer with a real key on disk sees different results than CI -- and the
+    "no key configured" tests silently pass for the wrong reason.
+    """
+    monkeypatch.chdir(tmp_path)
+
 # -- reply parsing ---------------------------------------------------------
 
 
@@ -291,6 +302,7 @@ def test_alternate_key_var_is_accepted(monkeypatch):
 def test_blank_key_counts_as_absent(monkeypatch):
     monkeypatch.setenv("OLLAMA_API_KEY", "   ")
     monkeypatch.delenv("OLLAMA_KEY", raising=False)
+    # A whitespace-only value is a configuration mistake, not a key.
     assert find_api_key() is None
 
 
@@ -308,3 +320,122 @@ def test_key_hint_never_contains_a_key(monkeypatch):
 
 def test_default_endpoint_is_ollama_cloud():
     assert LLMConfig().base_url == "https://ollama.com"
+
+
+# -- .env loading ----------------------------------------------------------
+# Added after discovering the tool could not see a key the user had put in a
+# root-level .env: nothing loaded the file, so the key was invisible.
+
+
+def clear_env(monkeypatch):
+    for name in ("OLLAMA_API_KEY", "OLLAMA_KEY", "OLLAMA_MODEL", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_key_is_read_from_a_dotenv_file(tmp_path, monkeypatch):
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    (tmp_path / ".env").write_text("OLLAMA_API_KEY=from-dotenv\n", encoding="utf-8")
+    load_dotenv(tmp_path)
+    assert find_api_key() == "from-dotenv"
+
+
+def test_alternate_name_in_dotenv_is_accepted(tmp_path, monkeypatch):
+    """The user's file used OLLAMA_KEY, not OLLAMA_API_KEY."""
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    (tmp_path / ".env").write_text("OLLAMA_KEY=alt-name\n", encoding="utf-8")
+    load_dotenv(tmp_path)
+    assert find_api_key() == "alt-name"
+
+
+def test_real_environment_wins_over_dotenv(tmp_path, monkeypatch):
+    """.env is a local convenience, not an override of a deliberate setting."""
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_API_KEY", "from-shell")
+    (tmp_path / ".env").write_text("OLLAMA_API_KEY=from-file\n", encoding="utf-8")
+    load_dotenv(tmp_path)
+    assert find_api_key() == "from-shell"
+
+
+def test_dotenv_is_found_in_a_parent_directory(tmp_path, monkeypatch):
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    (tmp_path / ".env").write_text("OLLAMA_API_KEY=parent\n", encoding="utf-8")
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    load_dotenv(nested)
+    assert find_api_key() == "parent"
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ('OLLAMA_API_KEY="quoted"', "quoted"),
+        ("OLLAMA_API_KEY='single'", "single"),
+        ("  OLLAMA_API_KEY = spaced  ", "spaced"),
+        ("export OLLAMA_API_KEY=exported", "exported"),
+    ],
+)
+def test_dotenv_tolerates_common_formatting(tmp_path, monkeypatch, line, expected):
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    (tmp_path / ".env").write_text(line + "\n", encoding="utf-8")
+    load_dotenv(tmp_path)
+    assert find_api_key() == expected
+
+
+def test_dotenv_ignores_comments_and_blanks(tmp_path, monkeypatch):
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    (tmp_path / ".env").write_text(
+        "# a comment\n\nOLLAMA_API_KEY=k\n# OLLAMA_MODEL=commented-out\n",
+        encoding="utf-8",
+    )
+    load_dotenv(tmp_path)
+    assert find_api_key() == "k"
+    assert "OLLAMA_MODEL" not in __import__("os").environ
+
+
+def test_dotenv_only_reads_known_names(tmp_path, monkeypatch):
+    """A stray assignment must not silently change unrelated behaviour."""
+    import os
+
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    monkeypatch.delenv("SOME_OTHER_SECRET", raising=False)
+    (tmp_path / ".env").write_text(
+        "OLLAMA_API_KEY=k\nSOME_OTHER_SECRET=should-not-load\n", encoding="utf-8"
+    )
+    load_dotenv(tmp_path)
+    assert "SOME_OTHER_SECRET" not in os.environ
+
+
+def test_missing_dotenv_is_not_an_error(tmp_path, monkeypatch):
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    load_dotenv(tmp_path)  # must not raise
+    assert find_api_key() is None
+
+
+def test_dotenv_can_set_model_and_endpoint(tmp_path, monkeypatch):
+    from autoqa.fix.llm import load_dotenv
+
+    clear_env(monkeypatch)
+    (tmp_path / ".env").write_text(
+        "OLLAMA_API_KEY=k\nOLLAMA_MODEL=some-model\nOLLAMA_BASE_URL=https://gw.example\n",
+        encoding="utf-8",
+    )
+    load_dotenv(tmp_path)
+    config = LLMConfig.from_env()
+    assert config.model == "some-model"
+    assert config.base_url == "https://gw.example"

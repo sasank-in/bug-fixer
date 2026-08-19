@@ -133,7 +133,12 @@ area. Nothing is applied automatically, and `fixed` means "tested", not
 "reviewed" — a verified patch proves the bug is gone, not that the change is the
 one you want.
 
-Two guards worth knowing about, because both were bugs I hit while building this:
+Verified on the demo API with a real model: **3 of 3 eligible findings produced
+accepted patches** — the SQL injection became a parameterized query with a None
+check returning 404, and the `KeyError` became a 400 naming the missing fields.
+
+Three guards worth knowing about, because all three were bugs found by running
+this against a live model:
 
 - **The patch window is the enclosing function**, found via AST, not a fixed line
   count. A line window can span a whole short file, and a reply containing only
@@ -141,17 +146,38 @@ Two guards worth knowing about, because both were bugs I hit while building this
 - **A patch that removes top-level definitions is rejected** before it is ever
   run, for the same reason — that failure otherwise surfaces as a baffling
   `NameError` at import time rather than an obviously bad patch.
+- **The prompt lists the names the file actually imports.** The model cannot see
+  the imports from an excerpt, so left to guess it reached for `HTTPException`
+  in a file that never imports it: a patch that parses, reads well, and raises
+  `NameError` on the first request. It now uses `JSONResponse` because that is
+  what is really there.
+- **A base-indentation mismatch is corrected, not rejected.** Replies routinely
+  come back indented as if nested; that discarded 2 of 3 otherwise-correct
+  patches. The shift is a single constant, never a reflow, so a genuinely
+  malformed reply still fails validation.
 
 ### Configuration
 
 | Setting | Env var | Default |
 | --- | --- | --- |
-| API key | `OLLAMA_API_KEY` | *required* — env only, never a CLI flag |
-| Model | `OLLAMA_MODEL` / `--model` | `qwen2.5-coder:7b` |
+| API key | `OLLAMA_API_KEY` or `OLLAMA_KEY` | *required* |
+| Model | `OLLAMA_MODEL` / `--model` | `gpt-oss:120b` |
 | Endpoint | `OLLAMA_BASE_URL` / `--llm-base-url` | `https://ollama.com` |
 
-The key is read from the environment only, so it stays out of shell history, and
-it is never written into a report or an error message.
+Settings come from the environment or a `.env` file in the project root (see
+`.env.example`); a real environment variable always wins over the file. The key
+is never accepted as a CLI flag, so it stays out of shell history, and it is
+never written into a report or an error message.
+
+**The catalogue is not an entitlement list.** `/api/tags` advertises models a
+given key cannot call — on a free Ollama Cloud key most answer
+`403 requires a subscription`. Run `autoqa-fix --list-models` to see what yours
+can actually reach; it probes each one rather than trusting the listing.
+
+The default was chosen by benchmarking the reachable models against the demo
+API's real bugs, not by name. On a free key that is `gpt-oss:120b`, which scored
+4/5 on the criteria (add a guard, parameterize the SQL, return a 4xx) at ~4s per
+call.
 
 This is the one part of AutoQA that needs a model. Everything else — mutation,
 oracles, clustering, minimization, sequences — is deterministic and needs no key.

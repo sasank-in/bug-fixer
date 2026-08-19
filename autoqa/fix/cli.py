@@ -86,6 +86,13 @@ example:
         "--check-key", action="store_true",
         help="verify the API key and model are reachable, then exit",
     )
+    parser.add_argument(
+        "--list-models", action="store_true",
+        help=(
+            "list models this key can actually call, then exit. The endpoint's "
+            "catalogue includes models a free key cannot use, so each is probed"
+        ),
+    )
     return parser
 
 
@@ -137,6 +144,26 @@ def main(argv: list[str] | None = None) -> int:
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    if args.list_models:
+        try:
+            catalogue = client.list_models()
+        except LLMError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"  {config.base_url} lists {len(catalogue)} model(s); probing each...")
+        usable, gated = [], []
+        for name in catalogue:
+            status = client.probe(name)
+            (usable if status == "ok" else gated).append((name, status))
+            print(f"    {'OK  ' if status == 'ok' else '--  '}{name:28} {status}")
+        print()
+        print(f"  {len(usable)} usable, {len(gated)} unavailable.")
+        if usable:
+            print(f"  Current default is {config.model!r}"
+                  f"{' (usable)' if any(n == config.model for n, _ in usable) else ' — NOT usable, override it'}.")
+            print("  Set one with OLLAMA_MODEL or --model.")
+        return 0
 
     if args.check_key:
         print(f"  endpoint {config.base_url}")

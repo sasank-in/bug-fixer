@@ -13,14 +13,59 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
 DEFAULT_BASE_URL = "https://ollama.com"
-DEFAULT_MODEL = "qwen2.5-coder:7b"
+# Ollama Cloud's catalogue is not the same as what a given key may call: most
+# entries in /api/tags answer 403 "requires a subscription". This default was
+# chosen because it is on the free tier, and benchmarked against the demo API's
+# real bugs rather than picked by name. Override with OLLAMA_MODEL or --model,
+# and use `autoqa-fix --list-models` to see what your key can actually reach.
+DEFAULT_MODEL = "gpt-oss:120b"
 
 # Env vars checked in order. OLLAMA_API_KEY is Ollama's own convention.
 _KEY_VARS = ("OLLAMA_API_KEY", "OLLAMA_KEY")
+
+# Names read out of a .env file, mirroring the env vars above.
+_DOTENV_NAMES = (*_KEY_VARS, "OLLAMA_MODEL", "OLLAMA_BASE_URL")
+
+
+def load_dotenv(start: Path | None = None) -> None:
+    """Load Ollama settings from the nearest .env, without adding a dependency.
+
+    A real environment variable always wins: .env is a convenience for local
+    work, not an override of what the shell or CI deliberately set.
+
+    Only the handful of names this module uses are read. Importing every
+    assignment out of an arbitrary file would let a stray line in someone's .env
+    quietly change unrelated behaviour.
+    """
+    directory = (start or Path.cwd()).resolve()
+    for candidate in (directory, *directory.parents):
+        path = candidate / ".env"
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            name = name.strip().removeprefix("export ").strip()
+            if name not in _DOTENV_NAMES or os.environ.get(name):
+                continue
+            value = value.strip()
+            # Strip one layer of matching quotes, which people add out of habit.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            if value:
+                os.environ[name] = value
+        return  # nearest .env wins; do not merge several
 
 
 class LLMError(RuntimeError):
@@ -38,6 +83,7 @@ class LLMConfig:
 
     @classmethod
     def from_env(cls, model: str | None = None, base_url: str | None = None) -> LLMConfig:
+        load_dotenv()
         return cls(
             model=model or os.environ.get("OLLAMA_MODEL") or DEFAULT_MODEL,
             base_url=(base_url or os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
@@ -45,6 +91,7 @@ class LLMConfig:
 
 
 def find_api_key() -> str | None:
+    load_dotenv()
     for name in _KEY_VARS:
         value = os.environ.get(name, "").strip()
         if value:
@@ -131,3 +178,53 @@ class OllamaClient:
                 f"reply contained no content: {json.dumps(body)[:300]}"
             )
         return str(content)
+
+    def list_models(self) -> list[str]:
+        """Model names the endpoint advertises.
+
+        Note this is the *catalogue*, not an entitlement list: on Ollama Cloud
+        most entries answer 403 "requires a subscription" for a free key. Use
+        `probe_models` to find out which ones can actually be called.
+        """
+        url = f"{self.config.base_url}/api/tags"
+        try:
+            response = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=30.0,
+            )
+        except httpx.HTTPError as exc:
+            raise LLMError(f"could not reach {url}: {exc}") from exc
+        if response.status_code >= 400:
+            raise LLMError(f"{url} returned {response.status_code}")
+        try:
+            models = response.json().get("models") or []
+        except ValueError as exc:
+            raise LLMError(f"non-JSON model list from {url}") from exc
+        return sorted(m.get("name", "") for m in models if m.get("name"))
+
+    def probe(self, model: str) -> str:
+        """Whether `model` is callable: 'ok', 'gated', or an error string.
+
+        Costs one tiny generation per model, which is the only reliable way to
+        tell an entitled model from a merely listed one.
+        """
+        try:
+            response = httpx.post(
+                f"{self.config.base_url}/api/chat",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={
+                    "model": model,
+                    "stream": False,
+                    "options": {"num_predict": 4},
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                timeout=90.0,
+            )
+        except httpx.HTTPError as exc:
+            return type(exc).__name__
+        if response.status_code == 200:
+            return "ok"
+        if response.status_code == 403:
+            return "gated"
+        return f"HTTP {response.status_code}"

@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from autoqa.fix.indent import realign
 from autoqa.fix.llm import LLMError, OllamaClient
 
 # Lines of source either side of the culprit line. Enough for the function plus
@@ -33,9 +34,16 @@ Rules:
    change that fixes the described bug.
 3. Preserve the exact original indentation. The snippet is an excerpt from a
    larger file and must drop back in unchanged apart from your fix.
-4. Do not rename anything, change signatures, add imports, or reformat.
+4. Do not rename anything, change signatures, or reformat.
 5. Fix the root cause. Do not wrap the whole body in try/except to hide it.
 6. Invalid input should be rejected with an explicit 4xx error, not crash.
+7. Use ONLY names listed as available below. The snippet is an excerpt, so a
+   name that is not listed does not exist at runtime and will raise NameError.
+   If the natural fix needs an unavailable name, use one that is available
+   instead -- e.g. return an error response rather than raising an exception
+   class that was never imported.
+8. Your output replaces exactly the lines you were given. Keep the same
+   top-level indentation as the first line of the snippet.
 If you cannot fix it from what you were given, output exactly: CANNOT_FIX
 """
 
@@ -99,6 +107,37 @@ def enclosing_block(source: str, line: int) -> tuple[int, int] | None:
         if best is None or (end - start) < (best[1] - best[0]):
             best = (start, end)
     return best
+
+
+def available_names(source: str) -> list[str]:
+    """Module-level names a patched snippet may safely reference.
+
+    The model only sees an excerpt, so it cannot tell whether `HTTPException` is
+    imported. Left to guess it reaches for the idiomatic name, producing a patch
+    that parses, passes review, and raises NameError on the first request. Naming
+    the real imports up front removes the guess.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return sorted(names)
 
 
 def _read_window(path: Path, line: int) -> tuple[int, int, str]:
@@ -243,11 +282,17 @@ def build_prompt(
     culprit: str,
     code: str,
     start_line: int,
+    available: list[str] | None = None,
 ) -> str:
     numbered = "\n".join(
         f"{start_line + i:5d}| {line}" for i, line in enumerate(code.splitlines())
     )
     last_line = start_line + len(code.splitlines()) - 1
+    names = (
+        ", ".join(available)
+        if available
+        else "(could not determine; assume only Python builtins)"
+    )
     return f"""A fuzzer found this bug.
 
 FINDING: {title}
@@ -266,6 +311,9 @@ shown for reference only — do NOT include them in your output.
 ```python
 {numbered}
 ```
+
+NAMES AVAILABLE AT MODULE LEVEL (nothing else exists at runtime):
+{names}
 
 Return the same lines with the bug fixed, in a ```python block, without the
 line-number prefixes."""
@@ -337,6 +385,7 @@ def propose(finding: dict, client: OllamaClient, repo_root: Path) -> Candidate:
         culprit=culprit,
         code=window,
         start_line=start,
+        available=available_names(path.read_text(encoding="utf-8")),
     )
 
     try:
@@ -350,7 +399,7 @@ def propose(finding: dict, client: OllamaClient, repo_root: Path) -> Candidate:
         start_line=start,
         end_line=end,
         original=window,
-        replacement=extract_code(reply),
+        replacement=realign(extract_code(reply), window),
         rationale=finding.get("title", ""),
     )
     if candidate.is_noop:

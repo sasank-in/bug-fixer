@@ -133,9 +133,14 @@ area. Nothing is applied automatically, and `fixed` means "tested", not
 "reviewed" — a verified patch proves the bug is gone, not that the change is the
 one you want.
 
-Verified on the demo API with a real model: **3 of 3 eligible findings produced
+Verified on the demo API with a real model: **3 of 4 eligible findings produced
 accepted patches** — the SQL injection became a parameterized query with a None
 check returning 404, and the `KeyError` became a 400 naming the missing fields.
+
+The fourth was rejected, and it is the best illustration of why the verification
+exists: it correctly parameterized the SQL but left the missing `None` check
+right below it, so the endpoint still crashed. The diff reads like a competent
+fix. Only running it caught that it was half a fix.
 
 Three guards worth knowing about, because all three were bugs found by running
 this against a live model:
@@ -174,10 +179,23 @@ given key cannot call — on a free Ollama Cloud key most answer
 `403 requires a subscription`. Run `autoqa-fix --list-models` to see what yours
 can actually reach; it probes each one rather than trusting the listing.
 
-The default was chosen by benchmarking the reachable models against the demo
-API's real bugs, not by name. On a free key that is `gpt-oss:120b`, which scored
-4/5 on the criteria (add a guard, parameterize the SQL, return a 4xx) at ~4s per
-call.
+The default is measured, not chosen by name — `tools/benchmark_models.py`
+probes reachability, then scores each usable model on the demo API's real bugs
+over several repetitions:
+
+| Model | Criteria met | Median |
+| --- | --- | --- |
+| `gemma4:31b` | 86% | 2.5s |
+| `gpt-oss:120b` | 71% | 5.1s |
+| `nemotron-3-super` | 71% | 12.6s |
+
+Repetitions matter: one model measured 3s and 38s on the same prompt in different
+runs, which is the difference between first and last place on a single sample.
+
+```bash
+python tools/benchmark_models.py          # probe + score everything reachable
+python tools/benchmark_models.py --reps 5 # more samples, less noise
+```
 
 This is the one part of AutoQA that needs a model. Everything else — mutation,
 oracles, clustering, minimization, sequences — is deterministic and needs no key.

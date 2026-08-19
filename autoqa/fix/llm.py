@@ -19,11 +19,17 @@ import httpx
 
 DEFAULT_BASE_URL = "https://ollama.com"
 # Ollama Cloud's catalogue is not the same as what a given key may call: most
-# entries in /api/tags answer 403 "requires a subscription". This default was
-# chosen because it is on the free tier, and benchmarked against the demo API's
-# real bugs rather than picked by name. Override with OLLAMA_MODEL or --model,
-# and use `autoqa-fix --list-models` to see what your key can actually reach.
-DEFAULT_MODEL = "gpt-oss:120b"
+# entries in /api/tags answer 403 "requires a subscription". Run
+# `autoqa-fix --list-models` to see what a key can actually reach.
+#
+# This default was measured, not chosen by name -- see tools/benchmark_models.py.
+# Across 3 repetitions on the demo API's real bugs, on a free-tier key:
+#   gemma4:31b        86%  median  2.5s
+#   gpt-oss:120b      71%  median  5.1s
+#   nemotron-3-super  71%  median 12.6s
+# Re-run the benchmark if the catalogue changes; a single sample is noise, since
+# one model measured 3s and 38s on the same prompt in different runs.
+DEFAULT_MODEL = "gemma4:31b"
 
 # Env vars checked in order. OLLAMA_API_KEY is Ollama's own convention.
 _KEY_VARS = ("OLLAMA_API_KEY", "OLLAMA_KEY")

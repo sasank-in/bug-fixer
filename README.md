@@ -22,8 +22,9 @@ bugs it found with a copy-pasteable reproducer for each.
          -H 'Content-Type: application/json' -d '{}'
 ```
 
-Status: the fuzz → observe → analyse → report loop works end to end. Proposing
-fixes and opening pull requests is [not built yet](#not-built-yet).
+Status: the fuzz → observe → analyse → report loop works end to end, and
+`autoqa-fix` proposes verified patches for findings. Opening pull requests
+automatically is [not built yet](#not-built-yet).
 
 ## Install
 
@@ -92,6 +93,68 @@ Run `autoqa --help` for the full list.
 
 Note the difference between `1` and `2`: `1` means the tool worked and your API
 has a bug; `2` means the tool never got to test anything.
+
+## Proposing fixes (`autoqa-fix`)
+
+A separate command that reads a JSON report, asks a model for a patch, and
+**verifies it by running it**. It never touches your working tree.
+
+```bash
+export OLLAMA_API_KEY="<your key>"     # $env:OLLAMA_API_KEY on PowerShell
+
+autoqa-fix --check-key                 # confirm the key and model are reachable
+
+autoqa-fix --report report.json            --launch "python -m uvicorn examples.vulnerable_api.app:app --port {port}"            --health /health
+```
+
+Patches land in `patches/` named by verdict, for you to review and `git apply`.
+
+Only findings that carry a **server-side stack trace** are eligible — without a
+culprit frame there is no located code to patch, so run the campaign with
+`--launch`. Findings below `--min-severity` (default `high`) are skipped too,
+since those are usually validation choices a human should make.
+
+### Why the verification matters
+
+A model will produce confident, plausible, wrong code, and reading the diff is
+not a reliable filter. So each candidate is copied into a scratch tree, the
+patched target is started, the exact reproducer is replayed, and the test suite
+is run. Four distinct verdicts come out, and keeping them distinct is the point:
+
+| Verdict | Meaning |
+| --- | --- |
+| `fixed` | Reproducer no longer fails **and** the suite still passes. |
+| `still_broken` | Patch did not fix it. A hang or reset counts here, not as "unknown". |
+| `broke_tests` | Bug is gone but the suite regressed — a fix that costs more than it saves. |
+| `unverifiable` | The check could not run at all (e.g. the patched app will not import). |
+
+Rejected patches are still written out: a wrong fix often points at the right
+area. Nothing is applied automatically, and `fixed` means "tested", not
+"reviewed" — a verified patch proves the bug is gone, not that the change is the
+one you want.
+
+Two guards worth knowing about, because both were bugs I hit while building this:
+
+- **The patch window is the enclosing function**, found via AST, not a fixed line
+  count. A line window can span a whole short file, and a reply containing only
+  the function then silently deletes the imports above it.
+- **A patch that removes top-level definitions is rejected** before it is ever
+  run, for the same reason — that failure otherwise surfaces as a baffling
+  `NameError` at import time rather than an obviously bad patch.
+
+### Configuration
+
+| Setting | Env var | Default |
+| --- | --- | --- |
+| API key | `OLLAMA_API_KEY` | *required* — env only, never a CLI flag |
+| Model | `OLLAMA_MODEL` / `--model` | `qwen2.5-coder:7b` |
+| Endpoint | `OLLAMA_BASE_URL` / `--llm-base-url` | `https://ollama.com` |
+
+The key is read from the environment only, so it stays out of shell history, and
+it is never written into a report or an error message.
+
+This is the one part of AutoQA that needs a model. Everything else — mutation,
+oracles, clustering, minimization, sequences — is deterministic and needs no key.
 
 ## How it works
 
@@ -283,13 +346,11 @@ worth doing:
 2. **Coverage-guided mutation.** Feedback from `coverage.py` would let mutation
    steer toward unexplored branches instead of re-hitting the same handler.
    Powerful, but only when the target is Python and runnable under coverage.
-3. **Proposes fixes / opens pull requests.** Deferred on purpose: the
-   deterministic core had to be trustworthy first, since an LLM patch layer on
-   top of noisy findings just produces confident wrong diffs. It also needs a
-   way to *verify* a fix — which sequences now make possible, since a fix can be
-   checked against the chain that exposed the bug. The JSON report is already
-   shaped as its input: each cluster carries the culprit frame, the minimized
-   reproducer, and the evidence.
+3. **Opening pull requests.** `autoqa-fix` proposes and verifies patches but
+   never applies them. Branching, committing, and opening a PR is the remaining
+   step, and it should stay behind an explicit flag: a verified patch is
+   evidence that the bug is gone and the suite is green, not evidence that the
+   change is the *right* one.
 
 ## Development
 

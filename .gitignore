@@ -34,6 +34,9 @@ report.json
 # The demo spec is generated from examples/vulnerable_api/app.py; see README.
 examples/vulnerable_api/openapi.json
 
+# Proposed patches from autoqa-fix are run artifacts for review, not source.
+patches/
+
 # Editors / IDEs
 .vscode/
 .idea/
@@ -45,3 +48,11 @@ examples/vulnerable_api/openapi.json
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Secrets. A committed API key has to be rotated, not just deleted, so these are
+# ignored by pattern rather than by remembering each time.
+.env
+.env.*
+!.env.example
+*.key
+secrets.*

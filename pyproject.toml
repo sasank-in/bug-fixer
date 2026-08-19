@@ -30,6 +30,7 @@ demo = [
 
 [project.scripts]
 autoqa = "autoqa.cli:main"
+autoqa-fix = "autoqa.fix.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["autoqa*"]
